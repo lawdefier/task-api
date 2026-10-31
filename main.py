@@ -1,10 +1,10 @@
 """
 Task API — FlyRank W3 · A1
-Stage 1: Read endpoints backed by SQLite
+Stage 2: Insert into database (POST /tasks)
 """
 
 from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 from pathlib import Path
 import sqlite3
@@ -51,6 +51,18 @@ def init_db():
 init_db()
 
 
+class TaskIn(BaseModel):
+    title: str
+    done: Optional[bool] = False
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("title must not be empty")
+        return v.strip()
+
+
 class TaskOut(BaseModel):
     id: int
     title: str
@@ -95,3 +107,17 @@ def get_task(task_id: int):
             detail=f"Task {task_id} not found",
         )
     return {"id": row["id"], "title": row["title"], "done": bool(row["done"])}
+
+
+@app.post("/tasks", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
+def create_task(body: TaskIn):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO tasks (title, done) VALUES (?, ?)",
+        (body.title, 1 if body.done else 0),
+    )
+    new_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return {"id": new_id, "title": body.title, "done": bool(body.done)}
