@@ -1,119 +1,109 @@
 """
-Task API — FlyRank W3 · A1
-A full CRUD API for managing tasks backed by a persistent SQLite database (tasks.db).
-Data survives server restarts.
+Task API — FlyRank W3 · A2
+Layered architecture: Routes -> Service -> Repository.
+Supports PostgreSQL (in Docker), Redis ping (stretch goal), and local fallbacks.
 """
 
-from fastapi import FastAPI, HTTPException, status, Query
-from pydantic import BaseModel, field_validator
+from fastapi import FastAPI, HTTPException, status, Query, Depends
 from typing import Optional
 from pathlib import Path
-import sqlite3
+import os
+from dotenv import load_dotenv
 
-# ──────────────────────────────────────────────
-# App configuration
-# ──────────────────────────────────────────────
+from models import TaskIn, TaskOut
+from repository import (
+    TaskRepository,
+    PostgresTaskRepository,
+    SQLiteTaskRepository,
+    InMemoryTaskRepository,
+)
+from service import TaskService
+
+# Load environment configuration (.env)
+load_dotenv()
 
 app = FastAPI(
     title="Task API",
     description=(
-        "A persistent to-do list CRUD API built for FlyRank Week 3 Assignment 1. "
-        "Backed by SQLite (`tasks.db`). Data survives server restarts."
+        "Layered CRUD API built for FlyRank W3 · A2. "
+        "Separates Routes -> Service -> Repository. "
+        "Supports PostgreSQL in Docker with volume persistence and optional Redis cache."
     ),
-    version="2.0",
+    version="3.0",
 )
 
+# ──────────────────────────────────────────────
+# Dependency Injection: Repository & Service Setup
+# ──────────────────────────────────────────────
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+REDIS_URL = os.getenv("REDIS_URL", "")
 DB_PATH = Path(__file__).parent / "tasks.db"
 
-
-# ──────────────────────────────────────────────
-# Database connection and initialization
-# ──────────────────────────────────────────────
-
-def get_db() -> sqlite3.Connection:
-    """Return a connection with Row factory enabled."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+_active_repo: Optional[TaskRepository] = None
+_storage_type = "unknown"
 
 
-def init_db():
+def get_task_repository() -> TaskRepository:
     """
-    Ensure the tasks table exists.
-    If the table is empty (first run), insert the 3 default example tasks.
+    Factory creating the appropriate repository.
+    Default: PostgresTaskRepository using DATABASE_URL from .env.
+    Fallback: SQLiteTaskRepository for offline local execution.
     """
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            done BOOLEAN NOT NULL DEFAULT 0
-        )
-    """)
-    cursor.execute("SELECT COUNT(*) FROM tasks")
-    count = cursor.fetchone()[0]
-    if count == 0:
-        cursor.executemany(
-            "INSERT INTO tasks (title, done) VALUES (?, ?)",
-            [
-                ("Read the FastAPI docs", 1),
-                ("Build the CRUD API", 0),
-                ("Push to GitHub", 0),
-            ],
-        )
-    conn.commit()
-    conn.close()
+    global _active_repo, _storage_type
+    if _active_repo is not None:
+        return _active_repo
+
+    if DATABASE_URL and (DATABASE_URL.startswith("postgres://") or DATABASE_URL.startswith("postgresql://")):
+        try:
+            repo = PostgresTaskRepository(DATABASE_URL)
+            if repo.check_health():
+                _active_repo = repo
+                _storage_type = "PostgreSQL (Docker)"
+                return _active_repo
+        except Exception:
+            pass
+
+    # Local fallback if Docker Postgres is offline
+    _active_repo = SQLiteTaskRepository(DB_PATH)
+    _storage_type = "SQLite (Local fallback)"
+    return _active_repo
 
 
-# Ensure database is created immediately upon module load & on app startup
-init_db()
+def get_task_service(repo: TaskRepository = Depends(get_task_repository)) -> TaskService:
+    """Injects TaskService configured with the active repository."""
+    return TaskService(repository=repo)
 
 
-@app.on_event("startup")
-def startup_event():
-    init_db()
-
-
-# ──────────────────────────────────────────────
-# Pydantic schemas
-# ──────────────────────────────────────────────
-
-class TaskIn(BaseModel):
-    """Payload for creating or updating a task."""
-    title: str
-    done: Optional[bool] = False
-
-    @field_validator("title")
-    @classmethod
-    def title_must_not_be_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("title must not be empty")
-        return v.strip()
-
-
-class TaskOut(BaseModel):
-    """Representation of a task returned by the API."""
-    id: int
-    title: str
-    done: bool
+def ping_redis() -> str:
+    """Optional Stretch Goal: Ping Redis if configured."""
+    if not REDIS_URL:
+        return "not_configured"
+    try:
+        import redis
+        client = redis.from_url(REDIS_URL, socket_timeout=1.0)
+        return "pong" if client.ping() else "offline"
+    except Exception:
+        return "offline"
 
 
 # ──────────────────────────────────────────────
-# Meta endpoints
+# Meta Endpoints
 # ──────────────────────────────────────────────
 
 @app.get(
     "/",
     summary="API Info",
-    description="Returns metadata about the API and available endpoints.",
+    description="Describes the API, storage backend, and available endpoints.",
     tags=["Meta"],
 )
 def root():
+    get_task_repository()
     return {
         "name": "Task API",
-        "version": "2.0",
-        "storage": "SQLite (tasks.db)",
+        "version": "3.0",
+        "architecture": "Layered (Routes -> Service -> Repository)",
+        "storage": _storage_type,
         "endpoints": ["/tasks", "/tasks/{id}", "/stats", "/reset", "/health"],
     }
 
@@ -121,163 +111,105 @@ def root():
 @app.get(
     "/health",
     summary="Health check",
-    description="Verifies the server and SQLite database connection are alive.",
+    description="Checks API status, database connection, and optional Redis ping.",
     tags=["Meta"],
 )
-def health():
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        conn.close()
-        return {"status": "ok", "database": "connected"}
-    except Exception as e:
+def health(service: TaskService = Depends(get_task_service)):
+    db_healthy = service.is_healthy()
+    redis_status = ping_redis()
+    if not db_healthy:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database connection error: {e}",
+            detail="Database health check failed",
         )
+    return {
+        "status": "ok",
+        "storage": _storage_type,
+        "database": "connected",
+        "redis": redis_status,
+    }
 
 
 # ──────────────────────────────────────────────
-# CRUD Endpoints
+# CRUD Endpoints (UNCHANGED from earlier assignments)
 # ──────────────────────────────────────────────
 
 @app.get(
     "/tasks",
     response_model=list[TaskOut],
     summary="List all tasks",
-    description=(
-        "Retrieves tasks from SQLite. Supports optional filtering by `done` "
-        "status and keyword substring matching on `title` via SQL `LIKE`."
-    ),
+    description="Fetches tasks via TaskService with optional completion filter and substring search.",
     tags=["Tasks"],
 )
 def list_tasks(
     done: Optional[bool] = Query(None, description="Filter by completion status"),
-    search: Optional[str] = Query(None, description="Search keyword in task title (SQL LIKE)"),
+    search: Optional[str] = Query(None, description="Search keyword in title"),
     sort: Optional[str] = Query("id", description="Sort field: 'id' or 'title'"),
+    service: TaskService = Depends(get_task_service),
 ):
-    conn = get_db()
-    cursor = conn.cursor()
-
-    query = "SELECT id, title, done FROM tasks WHERE 1=1"
-    params = []
-
-    if done is not None:
-        query += " AND done = ?"
-        params.append(1 if done else 0)
-
-    if search:
-        query += " AND title LIKE ?"
-        params.append(f"%{search}%")
-
-    if sort == "title":
-        query += " ORDER BY title ASC"
-    else:
-        query += " ORDER BY id ASC"
-
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
-
-    return [{"id": r["id"], "title": r["title"], "done": bool(r["done"])} for r in rows]
+    return service.list_tasks(done=done, search=search, sort=sort)
 
 
 @app.get(
     "/tasks/{task_id}",
     response_model=TaskOut,
     summary="Get single task",
-    description="Fetches a single task by its integer primary key from SQLite. Returns 404 if not found.",
+    description="Fetches one task by its ID. Returns 404 if not found.",
     tags=["Tasks"],
 )
-def get_task(task_id: int):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, title, done FROM tasks WHERE id = ?", (task_id,))
-    row = cursor.fetchone()
-    conn.close()
-
-    if not row:
+def get_task(task_id: int, service: TaskService = Depends(get_task_service)):
+    task = service.get_task(task_id)
+    if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task {task_id} not found",
         )
-    return {"id": row["id"], "title": row["title"], "done": bool(row["done"])}
+    return task
 
 
 @app.post(
     "/tasks",
     response_model=TaskOut,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a new task",
-    description="Inserts a new task row into SQLite. Returns 201 Created.",
+    summary="Create task",
+    description="Creates a new task. Requires a non-empty title. Returns 201 Created.",
     tags=["Tasks"],
 )
-def create_task(body: TaskIn):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO tasks (title, done) VALUES (?, ?)",
-        (body.title, 1 if body.done else 0),
-    )
-    new_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-
-    return {"id": new_id, "title": body.title, "done": bool(body.done)}
+def create_task(body: TaskIn, service: TaskService = Depends(get_task_service)):
+    return service.create_task(title=body.title, done=body.done)
 
 
 @app.put(
     "/tasks/{task_id}",
     response_model=TaskOut,
-    summary="Update a task",
-    description="Updates title and/or done status for the specified task in SQLite.",
+    summary="Update task",
+    description="Updates task title and/or done status. Returns 404 if task not found.",
     tags=["Tasks"],
 )
-def update_task(task_id: int, body: TaskIn):
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id FROM tasks WHERE id = ?", (task_id,))
-    if not cursor.fetchone():
-        conn.close()
+def update_task(task_id: int, body: TaskIn, service: TaskService = Depends(get_task_service)):
+    updated = service.update_task(task_id=task_id, title=body.title, done=body.done)
+    if not updated:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task {task_id} not found",
         )
-
-    cursor.execute(
-        "UPDATE tasks SET title = ?, done = ? WHERE id = ?",
-        (body.title, 1 if body.done else 0, task_id),
-    )
-    conn.commit()
-    conn.close()
-
-    return {"id": task_id, "title": body.title, "done": bool(body.done)}
+    return updated
 
 
 @app.delete(
     "/tasks/{task_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete a task",
-    description="Deletes a task row from SQLite by ID. Returns 204 No Content.",
+    summary="Delete task",
+    description="Removes a task by ID. Returns 204 No Content.",
     tags=["Tasks"],
 )
-def delete_task(task_id: int):
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id FROM tasks WHERE id = ?", (task_id,))
-    if not cursor.fetchone():
-        conn.close()
+def delete_task(task_id: int, service: TaskService = Depends(get_task_service)):
+    deleted = service.delete_task(task_id)
+    if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task {task_id} not found",
         )
-
-    cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    conn.commit()
-    conn.close()
     return None
 
 
@@ -288,50 +220,19 @@ def delete_task(task_id: int):
 @app.get(
     "/stats",
     summary="Task statistics",
-    description="Computes total, completed, and open task counts using SQL `COUNT()` aggregations.",
+    description="Returns aggregate counts (total, completed, open) calculated in storage.",
     tags=["Extras"],
 )
-def get_stats():
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT COUNT(*) FROM tasks")
-    total = cursor.fetchone()[0]
-
-    cursor.execute("SELECT COUNT(*) FROM tasks WHERE done = 1")
-    done_count = cursor.fetchone()[0]
-
-    conn.close()
-    return {
-        "total": total,
-        "done": done_count,
-        "open": total - done_count,
-    }
+def stats(service: TaskService = Depends(get_task_service)):
+    return service.get_stats()
 
 
 @app.post(
     "/reset",
-    summary="Reset database",
-    description="Wipes all tasks and re-inserts the 3 initial seed tasks into SQLite.",
+    summary="Reset tasks",
+    description="Restores the initial seed data.",
     tags=["Extras"],
 )
-def reset_database():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM tasks")
-    try:
-        cursor.execute("DELETE FROM sqlite_sequence WHERE name='tasks'")
-    except sqlite3.OperationalError:
-        pass
-
-    cursor.executemany(
-        "INSERT INTO tasks (title, done) VALUES (?, ?)",
-        [
-            ("Read the FastAPI docs", 1),
-            ("Build the CRUD API", 0),
-            ("Push to GitHub", 0),
-        ],
-    )
-    conn.commit()
-    conn.close()
-    return {"message": "Database reset to the 3 initial seed tasks"}
+def reset(service: TaskService = Depends(get_task_service)):
+    service.reset_database()
+    return {"message": "Storage reset to initial seed tasks"}
