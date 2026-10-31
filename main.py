@@ -1,6 +1,6 @@
 """
 Task API — FlyRank W3 · A1
-Stage 2: Insert into database (POST /tasks)
+Stage 3: Update and delete with SQL
 """
 
 from fastapi import FastAPI, HTTPException, status
@@ -121,3 +121,39 @@ def create_task(body: TaskIn):
     conn.commit()
     conn.close()
     return {"id": new_id, "title": body.title, "done": bool(body.done)}
+
+
+@app.put("/tasks/{task_id}", response_model=TaskOut)
+def update_task(task_id: int, body: TaskIn):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM tasks WHERE id = ?", (task_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task {task_id} not found",
+        )
+    cursor.execute(
+        "UPDATE tasks SET title = ?, done = ? WHERE id = ?",
+        (body.title, 1 if body.done else 0, task_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": task_id, "title": body.title, "done": bool(body.done)}
+
+
+@app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(task_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM tasks WHERE id = ?", (task_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task {task_id} not found",
+        )
+    cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
