@@ -1,10 +1,10 @@
 """
 Task API — FlyRank W3 · A1
-Stage 0: Create SQLite database (tasks.db)
+Stage 1: Read endpoints backed by SQLite
 """
 
 from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 from typing import Optional
 from pathlib import Path
 import sqlite3
@@ -34,7 +34,6 @@ def init_db():
             done BOOLEAN NOT NULL DEFAULT 0
         )
     """)
-    # Seed with 3 example tasks ONLY if table is empty
     cursor.execute("SELECT COUNT(*) FROM tasks")
     if cursor.fetchone()[0] == 0:
         cursor.executemany(
@@ -49,13 +48,13 @@ def init_db():
     conn.close()
 
 
-# Initialize database on module load
 init_db()
 
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
+class TaskOut(BaseModel):
+    id: int
+    title: str
+    done: bool
 
 
 @app.get("/")
@@ -71,3 +70,28 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "database": "connected"}
+
+
+@app.get("/tasks", response_model=list[TaskOut])
+def list_tasks():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, done FROM tasks")
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"id": r["id"], "title": r["title"], "done": bool(r["done"])} for r in rows]
+
+
+@app.get("/tasks/{task_id}", response_model=TaskOut)
+def get_task(task_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, done FROM tasks WHERE id = ?", (task_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task {task_id} not found",
+        )
+    return {"id": row["id"], "title": row["title"], "done": bool(row["done"])}
