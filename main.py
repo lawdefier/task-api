@@ -1,6 +1,6 @@
 """
 Task API — FlyRank W2 · A1
-Stage 3: Create with validation
+Stage 4: Full CRUD (Update & Delete)
 """
 
 from fastapi import FastAPI, HTTPException, status
@@ -35,6 +35,16 @@ class TaskOut(BaseModel):
     done: bool
 
 
+def find_task(task_id: int):
+    for task in tasks:
+        if task["id"] == task_id:
+            return task
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Task {task_id} not found",
+    )
+
+
 @app.get("/")
 def root():
     return {
@@ -56,13 +66,7 @@ def list_tasks():
 
 @app.get("/tasks/{task_id}", response_model=TaskOut)
 def get_task(task_id: int):
-    for task in tasks:
-        if task["id"] == task_id:
-            return task
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"Task {task_id} not found",
-    )
+    return find_task(task_id)
 
 
 @app.post("/tasks", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
@@ -72,3 +76,17 @@ def create_task(body: TaskIn):
     tasks.append(new_task)
     next_id += 1
     return new_task
+
+
+@app.put("/tasks/{task_id}", response_model=TaskOut)
+def update_task(task_id: int, body: TaskIn):
+    task = find_task(task_id)
+    task["title"] = body.title
+    task["done"] = body.done
+    return task
+
+
+@app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(task_id: int):
+    task = find_task(task_id)
+    tasks.remove(task)
