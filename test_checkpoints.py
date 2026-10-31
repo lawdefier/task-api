@@ -30,19 +30,28 @@ def test_api():
     print("RUNNING API CHECKPOINT TESTS")
     print("=" * 65)
 
+    # 1. Reset database to guarantee known baseline
+    req("POST", BASE_URL + "/reset")
+
+    # 2. Get list of tasks
+    status_tasks, body_tasks = req("GET", BASE_URL + "/tasks")
+    tasks_list = json.loads(body_tasks) if status_tasks == 200 else []
+    first_id = tasks_list[0]["id"] if tasks_list else 1
+    second_id = tasks_list[1]["id"] if len(tasks_list) > 1 else 2
+
     checks = [
-        ("GET",    "/",         None,                                    200),
-        ("GET",    "/health",   None,                                    200),
-        ("GET",    "/tasks",    None,                                    200),
-        ("GET",    "/tasks/1",  None,                                    200),
-        ("GET",    "/tasks/99", None,                                    404),
-        ("POST",   "/tasks",    {"title": "Persistent Task from Test"},  201),
-        ("POST",   "/tasks",    {},                                      422),
-        ("PUT",    "/tasks/1",  {"title": "FastAPI Docs Read", "done": True}, 200),
-        ("DELETE", "/tasks/2",  None,                                    204),
-        ("GET",    "/stats",    None,                                    200),
-        ("GET",    "/tasks?search=Persistent", None,                     200),
-        ("GET",    "/tasks?done=true",         None,                     200),
+        ("GET",    "/",                    None,                                           200),
+        ("GET",    "/health",              None,                                           200),
+        ("GET",    "/tasks",               None,                                           200),
+        ("GET",    f"/tasks/{first_id}",   None,                                           200),
+        ("GET",    "/tasks/9999",          None,                                           404),
+        ("POST",   "/tasks",               {"title": "Persistent Task from Test"},         201),
+        ("POST",   "/tasks",               {},                                             422),
+        ("PUT",    f"/tasks/{first_id}",   {"title": "FastAPI Docs Read", "done": True},  200),
+        ("DELETE", f"/tasks/{second_id}",  None,                                           204),
+        ("GET",    "/stats",               None,                                           200),
+        ("GET",    "/tasks?search=Persist",None,                                           200),
+        ("GET",    "/tasks?done=true",     None,                                           200),
     ]
 
     print(f"{'Method':<8} {'Path':<28} {'Expect':<8} {'Got':<8} Pass?")
